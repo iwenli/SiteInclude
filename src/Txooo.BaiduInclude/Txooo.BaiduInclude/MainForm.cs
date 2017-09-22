@@ -18,33 +18,23 @@ namespace Txooo.BaiduInclude
 {
     public partial class MainForm : Form
     {
+        /// <summary>
+        /// 设置是否允许关闭的标记位
+        /// </summary>
+        bool _shutdownFlag = false;
+
+        Task[] tasks = null;
         ServiceContext _context;
         string _checkLogFormat = "连接[{0}]  {1}";
+        TaskData _data;
+
         int _updateMaxCount = 50;
 
-        /// <summary>
-        /// 等待验证的队列
-        /// </summary>
-        public Queue<UrlInfo> WaitCheckQueue { set; get; }
+        string _maxDataCount = "500";
+        string _isDesc = "false";
+        string _maxThreadCount = "50";
+        string _searchWhere = "";
 
-        /// <summary>
-        /// 验证失败的List
-        /// </summary>
-        public List<UrlInfo> CheckFailList { set; get; }
-
-        /// <summary>
-        /// 验证成功的List
-        /// </summary>
-        public List<UrlInfo> CheckSuccessList { set; get; }
-        /// <summary>
-        /// 验证成功等待更新的List  满_updateMaxCount更新一次
-        /// </summary>
-        public List<UrlInfo> WaitUpdateList { set; get; }
-
-        /// <summary>
-        /// 等待提交百度的url集合
-        /// </summary>
-        public List<string> WaitSendUrlsList { set; get; }
 
         public MainForm()
         {
@@ -56,6 +46,7 @@ namespace Txooo.BaiduInclude
 
         private async void MainForm_Load(object sender, EventArgs e)
         {
+            GetConfig();
             //服务接入
             await InitServiceContext();
             InitStatusBar();
@@ -64,42 +55,83 @@ namespace Txooo.BaiduInclude
             tsTxtUrl.KeyUp += TsTxtUrl_KeyUp;
 
             tsBtnGo.Click += TsBtnGo_Click;
+            Task.Run(() =>
+             {
+                 AppendLogWarning("当前未检查数据总数：{0} 条", _context.DbService.GetWaitCheakListCountSync().Result);
+             });
+
         }
 
         async void TsBtnGo_Click(object sender, EventArgs e)
         {
+            SaveConfig();
+            tsBtnGo.Enabled = false;
             var cts = new CancellationTokenSource();
-
-            BeginOperation("正在提取待检查数据...", 0, true);
-            try
+            if (_data.WaitForCheckTasks.Count > 0)
             {
-                var maxDataCount = ConfigurationManager.AppSettings["MaxDataCount"] ?? "1000";
-                var list = await _context.DbService.GetWaitCheakListSync(Convert.ToInt32(maxDataCount));
+                AppendLog("继续上次未完成任务，待检查数据{0}条...", _data.WaitForCheckTasks.Count);
+                await Task.Delay(2000);
+            }
+            else
+            {
+                BeginOperation("开始提取待检查数据...", 0, true);
+                var list = await _context.DbService.GetWaitCheakListSync(Convert.ToInt32(_maxDataCount)
+                    , Convert.ToBoolean(_isDesc), _searchWhere);
                 EndOperation(string.Format("提取结束，共提取 {0} 条记录", list.Count));
-                await Task.Delay(1200);
-                if (list.Count > 0)
-                {
-                    WaitCheckQueue = new Queue<UrlInfo>(list);
-                    BeginOperation("正在检查是否收录...", list.Count, true);
-                    await ChechIncludeTask(cts.Token);
-                    //list = await CheckIsIncludeSync(list);
-                    // EndOperation();
-                    await Task.Run(async () =>
-                    {
-                        _context.DbService.UpdateIncludeUrl(WaitUpdateList);
-                        WaitUpdateList.Clear();
-
-                        await _context.BaiduService.LinkSubmitSync(WaitSendUrlsList);
-                        WaitSendUrlsList.Clear();
-                        EndOperation(string.Format("共处理{0}条，成功{1}条，失败{2}条", list.Count, CheckSuccessList.Count, CheckFailList.Count));
-                    });
-                }
+                _data.WaitForCheckTasks = new Queue<UrlInfo>(list);
             }
-            catch (Exception ex)
+            var _taskCount = Convert.ToInt32(_maxThreadCount);
+            if (_taskCount > _data.WaitForCheckTasks.Count)
             {
-                this.TxLogError(ex.Message, ex);
+                _taskCount = _data.WaitForCheckTasks.Count;
             }
-            
+            BeginOperation("正在检查是否收录...", _data.WaitForCheckTasks.Count, true);
+            tasks = new Task[_taskCount];
+            for (int i = 0; i < _taskCount; i++)
+            {
+                tasks[i] = new Task(() => ChechIncludeTask(cts.Token), cts.Token, TaskCreationOptions.LongRunning);
+                tasks[i].Start();
+                AppendLogWarning("[全局]任务{0}启动...", i + 1);
+            }
+            //Task.Run(async () =>
+            //{
+            //    while (true)
+            //    {
+            //        if (ProductCache.WaitUploadList.Count == 0 && allCount == ProductCache.UploadFailList.Count + ProductCache.UploadSuccessList.Count)
+            //        {
+            //            CloseWithResult("商品上传完成...");
+            //            break;
+            //        }
+            //        await Task.Delay(1500);
+            //    }
+            //});
+
+            //捕捉窗口关闭事件
+            //主要是给一个机会等待任务完成并把任务数据都保存
+            FormClosing += (_s, _e) =>
+           {
+               if (_shutdownFlag)
+                   return;
+
+               _e.Cancel = !_shutdownFlag;
+               AppendLog("[全局] 等待任务结束...");
+               cts.Cancel();
+               try
+               {
+                   if (tasks != null && tasks.Length > 0)
+                   {
+                       Task.WaitAll(tasks);
+                   }
+               }
+               catch (Exception ex)
+               {
+                   this.TxLogError(ex.Message, ex);
+               }
+               _shutdownFlag = true;
+               TaskContext.Instance.Save();
+               Close();
+           };
+
         }
 
         #region 输入连接验证
@@ -128,17 +160,18 @@ namespace Txooo.BaiduInclude
 
         async Task ChechIncludeTask(CancellationToken token)
         {
+            var cleanupcount = 0;
             UrlInfo urlModel = null;
             //token是用来控制队列退出的
             while (!token.IsCancellationRequested)
             {
                 urlModel = null;
 
-                lock (WaitCheckQueue)
+                lock (_data.WaitForCheckTasks)
                 {
-                    if (WaitCheckQueue.Count > 0)
+                    if (_data.WaitForCheckTasks.Count > 0)
                     {
-                        urlModel = WaitCheckQueue.Dequeue();
+                        urlModel = _data.WaitForCheckTasks.Dequeue();
                     }
                 }
                 //如果没有任务，则退出
@@ -151,46 +184,55 @@ namespace Txooo.BaiduInclude
                 {
                     urlModel.IsInclude = await _context.BaiduService.CheckIsIncludeSync(urlModel.Url);
                     AppendLogWarning(_checkLogFormat, urlModel.Url, urlModel.IsInclude ? "已收录" : "未收录");
-
                 }
                 catch (Exception ex)
                 {
                     AppendLogError("处理{0} 异常:{1}", urlModel.Url, ex.Message);
                     this.TxLogError(string.Format("处理{0} 异常:{1}", urlModel.Url, ex.Message), ex);
                 }
-                UpdateTaskProcess();
                 if (urlModel.IsInclude)
                 {
-                    lock (CheckSuccessList)
+                    lock (_data.CheckSuccess)
                     {
-                        CheckSuccessList.Add(urlModel);
+                        _data.CheckSuccess.Add(urlModel.Id.ToString(), urlModel);
+                        //CheckSuccessList.Add(urlModel);
                     }
-                    lock (WaitUpdateList)
+                    lock (_data.WaitUpdateList)
                     {
-                        WaitUpdateList.Add(urlModel);
-                        if (WaitUpdateList.Count == _updateMaxCount)
+                        _data.WaitUpdateList.Add(urlModel);
+                        if (_data.WaitUpdateList.Count == _updateMaxCount)
                         {
-                            _context.DbService.UpdateIncludeUrl(WaitUpdateList);
-                            WaitUpdateList.Clear();
+                            _context.DbService.UpdateIncludeUrl(_data.WaitUpdateList, true);
+                            _data.WaitUpdateList.Clear();
                         }
                     }
                 }
                 else
                 {
-                    lock (CheckFailList)
+                    lock (_data.CheckFail)
                     {
-                        CheckFailList.Add(urlModel);
+                        _data.CheckFail.Add(urlModel.Id.ToString(), urlModel);
                     }
-                    lock (WaitSendUrlsList)
+                    lock (_data.WaitSendUrlsList)
                     {
-                        WaitSendUrlsList.Add(urlModel.Url);
-                        if (WaitSendUrlsList.Count == _updateMaxCount)
+                        _data.WaitSendUrlsList.Add(urlModel);
+                        if (_data.WaitSendUrlsList.Count == _updateMaxCount)
                         {
-                            _context.BaiduService.LinkSubmitSync(WaitSendUrlsList);
-                            WaitSendUrlsList.Clear();
+                            _context.BaiduService.LinkSubmitSync(_data.WaitSendUrlsList.Select(m => m.Url));
+                            _context.DbService.UpdateIncludeUrl(_data.WaitSendUrlsList, false);
+                            _data.WaitSendUrlsList.Clear();
                         }
                     }
 
+                }
+                UpdateTaskProcess();
+                if (cleanupcount++ > 20)
+                {
+                    //每20个任务后手动释放一下内存
+                    cleanupcount = 0;
+                    GC.Collect();
+                    //保存任务数据，防止什么时候宕机了任务进度回滚太多
+                    TaskContext.Instance.Save();
                 }
             }
         }
@@ -247,6 +289,7 @@ namespace Txooo.BaiduInclude
             else
             {
                 stProgress.Value = stProgress.Value + 1;
+                stStatus.Text = string.Format("已检查:{0}个，共{1}个", stProgress.Value, stProgress.Maximum);
             }
             if (stProgress.Value == stProgress.Maximum)
             {
@@ -281,12 +324,12 @@ namespace Txooo.BaiduInclude
         async Task InitServiceContext()
         {
             _context = new ServiceContext();
-            CheckFailList = new List<UrlInfo>();
-            CheckSuccessList = new List<UrlInfo>();
-            WaitUpdateList = new List<UrlInfo>();
-            WaitSendUrlsList = new List<string>();
-
             BeginOperation("正在初始化配置信息...", 0, true);
+            AppendLog("[全局] 正在初始化...");
+            SaveConfig();
+            TaskContext.Instance.Init();
+            _data = TaskContext.Instance.Data;
+            AppendLog("[全局] 初始化完成...");
             await Task.Delay(200);
             EndOperation();
         }
@@ -337,6 +380,8 @@ namespace Txooo.BaiduInclude
             tsBtnGoWithUrl.Enabled = tsBtnGo.Enabled = true;
         }
         #endregion
+
+
 
         #region 日志相关
         /// <summary>
@@ -421,6 +466,41 @@ namespace Txooo.BaiduInclude
             }
             txtLog.AppendText(Environment.NewLine);
             txtLog.ScrollToCaret();
+        }
+        #endregion
+
+        #region 设置相关
+        void GetConfig()
+        {
+            _maxDataCount = AppConfig.GetItem("MaxDataCount") ?? "500";
+            _isDesc = AppConfig.GetItem("IsDesc") ?? "false";
+            _searchWhere = AppConfig.GetItem("SearchWhere") ?? "";
+            _maxThreadCount = AppConfig.GetItem("MaxThreadCount") ?? "50";
+
+            txtMaxDataCount.Text = _maxDataCount;
+            txtMaxThreadCount.Text = _maxThreadCount;
+            rchTxtSearchWhere.Text = _searchWhere;
+            chkBoxIsDesc.Checked = _isDesc.Equals("true");
+        }
+        void SaveConfig()
+        {
+            _maxDataCount = txtMaxDataCount.Text;
+            if (string.IsNullOrEmpty(_maxDataCount))
+            {
+                _maxDataCount = "0";
+            }
+            _isDesc = chkBoxIsDesc.Checked.ToString().ToLower();
+            _searchWhere = rchTxtSearchWhere.Text;
+            _maxThreadCount = txtMaxThreadCount.Text;
+            if (string.IsNullOrEmpty(_maxDataCount))
+            {
+                _maxThreadCount = "50";
+            }
+
+            AppConfig.ModifyItem("MaxDataCount", _maxDataCount);
+            AppConfig.ModifyItem("IsDesc", _isDesc);
+            AppConfig.ModifyItem("SearchWhere", _searchWhere);
+            AppConfig.ModifyItem("MaxThreadCount", _maxThreadCount);
         }
         #endregion
     }

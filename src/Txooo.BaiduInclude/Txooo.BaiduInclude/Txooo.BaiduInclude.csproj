@@ -40,6 +40,9 @@
     <ApplicationIcon>baidu-icon.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="Newtonsoft.Json, Version=10.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
+      <HintPath>..\packages\Newtonsoft.Json.10.0.3\lib\net45\Newtonsoft.Json.dll</HintPath>
+    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Configuration" />
     <Reference Include="System.Core" />
@@ -58,6 +61,7 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Common\AppConfig.cs" />
     <Compile Include="Common\AppInfo.cs" />
     <Compile Include="MainForm.cs">
       <SubType>Form</SubType>
@@ -73,6 +77,14 @@
     <Compile Include="Service\ServiceBase.cs" />
     <Compile Include="Service\ServiceContext.cs" />
     <Compile Include="Service\Session.cs" />
+    <Compile Include="Service\TaskContext.cs" />
+    <Compile Include="Service\TaskData.cs" />
+    <Compile Include="SetForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="SetForm.Designer.cs">
+      <DependentUpon>SetForm.cs</DependentUpon>
+    </Compile>
     <EmbeddedResource Include="MainForm.resx">
       <DependentUpon>MainForm.cs</DependentUpon>
     </EmbeddedResource>
@@ -86,7 +98,11 @@
       <DependentUpon>Resources.resx</DependentUpon>
       <DesignTime>True</DesignTime>
     </Compile>
+    <EmbeddedResource Include="SetForm.resx">
+      <DependentUpon>SetForm.cs</DependentUpon>
+    </EmbeddedResource>
     <None Include="app.config" />
+    <None Include="packages.config" />
     <None Include="Properties\Settings.settings">
       <Generator>SettingsSingleFileGenerator</Generator>
       <LastGenOutput>Settings.Designer.cs</LastGenOutput>
@@ -103,8 +119,8 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="baidu-icon.ico" />
+    <Content Include="HTMLPage1.html" />
     <Content Include="lib\Txooo.dll" />
-    <Content Include="Service\HTMLPage1.html" />
     <None Include="Resources\info_16.png" />
     <None Include="Resources\globe_16.png" />
     <None Include="Resources\counseling_style_51.png" />
